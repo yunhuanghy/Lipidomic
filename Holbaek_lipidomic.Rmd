@@ -1,0 +1,441 @@
+---
+title: "lipidomics_obesity_cardiometabolic"
+author: Yun Huang, Sara Elizabeth Stinson
+output: html_document
+date: '2023-02-08'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source(here::here("R/package-loading.R"))
+```
+
+
+#Logistic Regression of Lipids with Obesity (Original from Sara Stinson)
+```{r pressure, echo=FALSE}
+# Define outcome variable
+dep_vars <- c("weight_2group_factor")
+
+# Define predictor variables (lipid names)
+ind_vars <- abbr_vars$Colnames
+
+# Standardize predictor variables
+glm_group[ind_vars] <- scale(glm_group[ind_vars])
+
+# Define covariates
+cov_vars <- c("z_age", "Gender")
+
+# Generate all combinations of covariates
+cov_vars_comb <-
+    unlist(sapply(seq_len(length(cov_vars)),
+                  function(i) {
+                      apply(combn(cov_vars, i), 2, function(x)
+                          paste(x, collapse = "+"))
+                  }))
+
+# Select specific combination of covariates
+cov <- cov_vars_comb[3]
+
+# Generate combinations of dependent, independent, and covariate variables
+var_comb <- expand.grid(dep_vars, ind_vars, cov)
+
+# Create formulas for logistic regression models
+formula <-
+    sprintf("%s~%s+%s", var_comb$Var1, var_comb$Var2, var_comb$Var3)
+
+# Fit logistic regression models
+glm <- lapply(formula, function(f)   {
+    fit <- glm(f, data = glm_group, family = binomial("logit"))
+    fit$coefficients <- coef(summary(fit))
+    return(fit)
+})
+names(glm) <- formula
+
+# Combine model outputs
+glm <-
+    cbind(formula, as.data.frame(do.call(rbind, lapply(glm, function(x) {
+        coefs <- coef(x)
+        rbind(coefs[2,])
+    }))))
+
+# Compute Confidence Intervals
+glm_df <- glm %>%
+    dplyr::rename(beta = "Estimate") %>%
+    dplyr::mutate(OR = exp(beta)) %>%
+    dplyr::rename(se = "Std. Error") %>%
+    dplyr::rename(pvalue = "Pr(>|z|)") %>%
+    dplyr::select(-"z value") %>%
+    mutate(CI_lower = (OR - 1.96 * se)) %>%
+    mutate(CI_upper = (OR + 1.96 * se)) %>%
+    dplyr::mutate(Outcome = case_when(
+        grepl("weight_2group_factor", formula) ~ "Overweight/Obesity vs. Normal"
+    )) %>%
+    dplyr::mutate(var_comb = var_comb$Var2) %>%
+    dplyr::mutate(Figure_Name_V1 = abbr_vars$Figure_Name_V1[match(glm_df$var_comb, abbr_vars$Colnames)]) %>%
+    dplyr::mutate(Lipid_Class = abbr_vars$Lipid_Class[match(glm_df$var_comb, abbr_vars$Colnames)]) %>%
+    dplyr::mutate(FDR = p.adjust (pvalue, method = 'fdr')) %>%
+    dplyr::mutate(bon = p.adjust (pvalue, method = 'bon')) %>%
+    dplyr::mutate(Size_fdr = ifelse(FDR < 0.05, "3", "1")) %>%
+    dplyr::mutate(
+        Size_fdrbon = case_when(
+            pvalue >= 0.05 ~ "0.5",
+            pvalue < 0.05 & FDR >= 0.05  ~ "1",
+            FDR < 0.05 & bon >= 0.05  ~ "2",
+            bon < 0.05  ~ "4"
+        )
+    ) %>%
+    dplyr::mutate(label_fdr = case_when(FDR < 0.05 ~ Figure_Name_V1))  %>%
+    dplyr::mutate(label_bon = case_when(bon < 0.05 ~ Figure_Name_V1)) %>%
+    dplyr::mutate(
+        main_class = case_when(
+            Lipid_Class %in% c("TG", "DG", "FA", "CE") ~ "Other lipids",
+            Lipid_Class %in% c(
+                "PC",
+                "PE",
+                "PE(O/P)",
+                "PI",
+                "PG",
+                "LPE",
+                "LPC",
+                "PA",
+                "LdMePE",
+                "dMePE"
+            ) ~ "Glycerophospholipids",
+            Lipid_Class %in% c("SM", "Cer", "LacCer", "SHexCer", "HexCer") ~ "Sphingolipids"
+        )
+    ) %>%
+    dplyr::mutate(sign = case_when(OR > 1  ~ "positive",
+                                   OR < 1  ~ "negative")) %>%
+    dplyr::mutate(main_class = factor(
+        main_class,
+        levels = c("Sphingolipids", "Glycerophospholipids", "Other lipids")
+    ))
+
+##forest plot
+forest_class <- glm_df %>%
+    mutate(Color_FDR = ifelse(FDR > 0.05, "grey",
+                              ifelse(FDR < 0.05 &
+                                         OR > 1, "orange", "blue"))) %>%
+    ggplot(aes(x = OR, y = Lipid_Class)) +
+    geom_pointrange(
+        aes(
+            xmin = CI_lower,
+            xmax = CI_upper,
+            colour = Color_FDR
+        ),
+        position = position_jitter(width = 0.02, height = 0.2),
+        size = 0.3,
+        linetype = 'dotted'
+    ) +
+    scale_color_manual(
+        values = c("#56B4E9", '#999999', "#D55E00"),
+        name = "Sign",
+        labels = c("Negative", "Not significant", "Positive")
+    ) +
+    scale_size_manual(
+        values = c(1, 3),
+        name = expression(paste(italic("P"), " value")),
+        labels = c("Not significant", "FDR < 0.05")
+    ) +
+    scale_x_continuous(breaks = c(0.5, 1, 2),
+                       labels = c("0.5", "1",  "2")) +
+    scale_y_discrete(limits = rev) +
+    labs(y = "", x = "OR (95% CI) for Overweight/Obesity per SD unit lipid", title =
+             "") +
+    geom_vline(
+        xintercept = 1,
+        color = "black",
+        linetype = "dashed",
+        alpha = .4
+    ) +
+    theme_minimal() +
+    theme_bw() +
+    theme(strip.placement = "outside") +
+    guides(size = "none") +
+    theme(
+        plot.margin = ggplot2::margin(0, 0, 0, 0, "pt"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_rect(colour = "black", size = 0.4),
+        legend.title = element_text(size = 8, colour = "black"),
+        legend.text = element_text(size = 8, colour = "black"),
+        axis.text.x = element_text(
+            family = "sans",
+            size = 8,
+            colour = "black"
+        ),
+        axis.text.y = element_text(
+            family = "sans",
+            size = 8,
+            colour = "black"
+        ),
+        axis.title.x = element_text(size = 8, colour = "black"),
+        axis.title.y = element_text(size = 8, colour = "black"),
+        strip.text.x = element_text(
+            colour = "black",
+            size = 8,
+            face = "bold"
+        ),
+        strip.text.y = element_text(
+            family = "sans",
+            colour = "black",
+            size = 7,
+            face = "bold"
+        ),
+        strip.background.y = element_rect(
+            colour = "black",
+            fill = "white",
+            size = 0.4
+        )
+    ) +
+    facet_grid(
+        rows = vars(main_class),
+        scales = "free",
+        space = "free",
+        switch = "y"
+    )
+
+#bar plot
+glm_format_sig_n <- glm_df %>%
+    group_by(main_class, Lipid_Class) %>%
+    dplyr::summarise(
+        Total_lipid = n(),
+        n_sig = length(Total_lipid [which(FDR < 0.05)]) ,
+        n_p_sig = length(Total_lipid [which(FDR < 0.05 &
+                                                OR > 1)]) ,
+        n_n_sig = length(Total_lipid [which(FDR < 0.05 &
+                                                OR < 1)]),
+        p_pro = round(length(Total_lipid [which(FDR < 0.05 &
+                                                    OR > 1)]) / n(), 2),
+        n_pro = round(length(Total_lipid [which(FDR < 0.05 &
+                                                    OR < 1)]) / n(), 2)
+    ) %>%
+    dplyr::mutate(pro = case_when(p_pro >= n_pro ~ p_pro,
+                                  p_pro < n_pro ~ (0 - n_pro))) %>%
+    dplyr::select(Lipid_Class,
+                  main_class,
+                  Total_lipid,
+                  n_p_sig,
+                  n_n_sig,
+                  p_pro,
+                  n_pro) %>%
+    arrange(main_class, desc(Total_lipid))
+
+glm_format_sig_n_f <-
+    reshape2::melt(
+        glm_format_sig_n,
+        id.vars = c("main_class", "Lipid_Class",  "n_p_sig", "n_n_sig"),
+        measure.vars = c("p_pro", "n_pro")
+    )
+
+glm_format_sig_n_f <- glm_format_sig_n_f %>%
+    dplyr::mutate(pro = case_when(variable == "n_pro" ~ (0 - value),
+                                  variable == "p_pro" ~ value))
+
+#patchwork
+pro_class <-
+    ggplot(glm_format_sig_n_f,
+           aes(x = Lipid_Class_V3, y = pro, fill = variable)) +
+    geom_bar(data = subset(glm_format_sig_n_f, variable == "n_pro"),
+             stat = "identity") +
+    geom_bar(data = subset(glm_format_sig_n_f, variable == "p_pro"),
+             stat = "identity") +
+    scale_fill_manual(
+        values = c("#56B4E9", "#D55E00"),
+        name = "Sign",
+        labels = c("Negative-associated", "Positive-associated")
+    ) +
+    coord_flip() +
+    theme_bw() +
+    scale_x_discrete(limits = rev) +
+    scale_y_continuous(
+        limits = c(-1, 1),
+        breaks = c(-1,-0.5, 0, 0.5, 1.0),
+        labels = c("100", "50", "0", "50", "100")
+    ) +
+    theme(strip.placement = "outside") +
+    labs(y = "Proportion (%)", x = "", title = "") +
+    guides(fill = FALSE) +
+    theme(
+        plot.margin = ggplot2::margin(0, 0, 0, 0, "pt"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_rect(colour = "black", size = 0.4),
+        axis.text.x = element_text(
+            family = "sans",
+            size = 8,
+            colour = "black"
+        ),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = 8, colour = "black"),
+        axis.title.y = element_blank(),
+        strip.text.x = element_text(
+            colour = "black",
+            size = 8,
+            face = "bold"
+        ),
+        strip.background.y = element_rect(
+            colour = "black",
+            fill = "white",
+            size = 0.4
+        ),
+        strip.text.y = element_blank()
+    ) +
+    facet_grid(
+        rows = vars(main_class),
+        scales = "free",
+        space = "free",
+        switch = "y"
+    )
+
+#merge forest and pro
+for_pro <-
+    forest_class + pro_class + plot_layout(nrow = 1,
+                                           widths = c(1, 0.35),
+                                           guides = 'collect') & theme(legend.position = 'right')
+
+```
+
+#Fig2-plsda with age group 
+```{r}
+##PLSDA
+lipid_nor_df <- lipid_nor[, abbr_vars$Colnames] #227 lipids
+
+rownames(lipid_nor_df) <- lipid_nor$Sample_ID
+
+lipid_nor$Age_group <- as.factor(lipid_nor$Age_group)
+
+plsModel_nor <-
+    opls(
+        lipid_nor_df,
+        lipid_nor$Age_group,
+        permI = 300,
+        predI = 2,
+        crossvalI = 10
+    ) #unused argument (cvI = 10)
+
+data <- as.data.frame(plsModel_nor@scoreMN)
+data$group = lipid_nor$Age_group
+data$samples = rownames(data)
+colnames(data)[3] <- "Normal weight"
+#
+x_lab <- plsModel_nor@modelDF[1, "R2X"] * 100
+y_lab <- plsModel_nor@modelDF[2, "R2X"] * 100
+
+col = c("#0072B2", "#D55E00", "#009E73")
+
+plsda_normal <- ggplot(data,
+                       aes(
+                           x = p1,
+                           y = p2,
+                           color = `Normal weight`,
+                           shape = `Normal weight`
+                       )) +
+    theme_bw() +
+    geom_point(size = 1.0) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    theme(panel.grid = element_blank()) +
+    geom_vline(xintercept = 0,
+               lty = "dashed",
+               color = "red") +
+    geom_hline(yintercept = 0,
+               lty = "dashed",
+               color = "red") +
+    labs(x = paste0("P1 (", x_lab, "%)"),
+         y = paste0("P2 (", y_lab, "%)")) +
+    stat_ellipse(
+        data = data,
+        geom = "polygon",
+        level = 0.95,
+        linetype = 2,
+        size = 0.5,
+        aes(fill = `Normal weight`),
+        alpha = 0.2,
+        show.legend = T
+    ) +
+    scale_color_manual(values = col) +
+    scale_fill_manual(values = col) +
+    scale_y_continuous(limits = c(-10, 10), breaks = c(-10,-5, 0, 5, 10)) +
+    scale_x_continuous(limits = c(-10, 10), breaks = c(-10,-5, 0, 5, 10)) +
+    theme(
+        text = element_text(family = "sans", size = 8),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8, angle = 90),
+        axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(size = 8),
+        panel.grid = element_blank()
+    )
+
+#in overweight/obesity
+lipid_ob_df <- lipid_ob[, abbr_vars$Colnames]
+
+rownames(lipid_ob_df) <- lipid_ob$Sample_ID
+
+plsModel_ob <-
+    opls(
+        lipid_ob_df,
+        lipid_ob$Age_group,
+        permI = 300,
+        predI = 2,
+        crossvalI = 10
+    )
+
+summary(plsModel_ob)
+
+data_ob <- as.data.frame(plsModel_ob@scoreMN)
+data_ob$group = lipid_ob$Age_group
+data_ob$samples = rownames(data_ob)
+colnames(data_ob)[3] <- "Overweight/Obesity"
+
+x_lab_ob <- plsModel_ob@modelDF[1, "R2X"] * 100
+y_lab_ob <- plsModel_ob@modelDF[2, "R2X"] * 100
+
+legend_title <- ""
+
+plsda_ob <- ggplot(data_ob,
+                   aes(
+                       x = p1,
+                       y = p2,
+                       color = `Overweight/Obesity`,
+                       shape = `Overweight/Obesity`
+                   )) +
+    theme_bw() +
+    geom_point(size = 1.0) +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    theme(panel.grid = element_blank()) +
+    geom_vline(xintercept = 0,
+               lty = "dashed",
+               color = "red") +
+    geom_hline(yintercept = 0,
+               lty = "dashed",
+               color = "red") +
+    labs(x = paste0("P1 (", x_lab_ob, "%)"),
+         y = paste0("P2 (", y_lab_ob, "%)")) +
+    stat_ellipse(
+        data = data_ob,
+        geom = "polygon",
+        level = 0.95,
+        linetype = 2,
+        size = 0.5,
+        aes(fill = `Overweight/Obesity`),
+        alpha = 0.2,
+        show.legend = T
+    ) +
+    scale_color_manual(values = col) +
+    scale_fill_manual(values = col) +
+    scale_y_continuous(limits = c(-10, 10), breaks = c(-10,-5, 0, 5, 10)) +
+    scale_x_continuous(limits = c(-10, 10), breaks = c(-10,-5, 0, 5, 10)) +
+    theme(
+        text = element_text(family = "sans", size = 8),
+        axis.title.x = element_text(size = 8),
+        axis.title.y = element_text(size = 8, angle = 90),
+        axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(size = 8),
+        panel.grid = element_blank()
+    )
+
+```
+
